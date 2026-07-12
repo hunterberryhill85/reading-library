@@ -244,15 +244,18 @@ async function canonicalize(book) {
   const disp = cleanDisplayTitle(book.title, book.authors);
   const patch = { title: disp, authors };
   const wantAuthor = authors[0] || "";
-  let docs = await olDocs(queryTitle(disp), wantAuthor);
-  if (!docs.length && wantAuthor) docs = await olDocs(queryTitle(disp), "");
   const mySn = surnameOf(authors[0] || "");
+  let docs = await olDocs(queryTitle(disp), wantAuthor);
+  // Open Library often splits a book across duplicate author spellings, only one of
+  // which carries a cover. If no author-matched result has a cover, widen the search.
+  const coveredMatch = (ds) => ds.some((d) => d.cover_i && (!mySn || (d.author_name || []).some((n) => surnameOf(n) === mySn)));
+  if (!docs.length || !coveredMatch(docs)) docs = docs.concat(await olDocs(queryTitle(disp), ""));
   let best = null, bestScore = 0.6;                             // require a minimum confidence
   for (const d of docs) {
     const aMatch = mySn && (d.author_name || []).some((n) => surnameOf(n) === mySn) ? 1 : 0;
     const ov = titleOverlap(disp, d.title);
     if (!aMatch && ov < 0.5) continue;
-    const score = aMatch * 1.5 + ov + (d.cover_i ? 0.3 : 0);
+    const score = aMatch * 1.5 + ov + (d.cover_i ? 0.7 : 0);   // strongly prefer an edition with a cover
     if (score > bestScore) { bestScore = score; best = d; }
   }
   if (best) {
@@ -757,8 +760,8 @@ async function enrichAndPush(books) {
 // Re-run standardization + cover fetch on books already in the library (imports).
 async function normalizeLibrary() {
   closeSheet();
-  const targets = state.books.filter((b) => !b.cover_url || b.source === "kindle" || b.source === "nas");
-  if (!targets.length) { toast("Everything looks clean already ✓"); return; }
+  const targets = state.books.filter((b) => !b.cover_url);
+  if (!targets.length) { toast("Every book already has a cover ✓"); return; }
   let done = 0;
   toast(`Cleaning up ${targets.length} books…`);
   for (const b of targets) {
