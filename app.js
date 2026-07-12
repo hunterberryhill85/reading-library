@@ -188,6 +188,81 @@ async function searchOpenLibrary(q, max = 12) {
   } catch { return []; }
 }
 
+// ---------------------------------------------------------------- Metadata normalization
+// Turns messy imported filenames ("[Series 1] Author - Title (2015, Pub) - libgen.li")
+// into clean, standardized entries with real covers, via authoritative Open Library data.
+function flipName(a) {
+  const m = /^([^,]+),\s*(.+)$/.exec(String(a || "").trim());  // "Last, First" -> "First Last"
+  return (m ? `${m[2]} ${m[1]}` : String(a || "")).replace(/\s+/g, " ").trim();
+}
+function surnameOf(a) {
+  const t = flipName(a).split(/\s+/).filter(Boolean);
+  return (t[t.length - 1] || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+function cleanDisplayTitle(raw, authors) {
+  let s = String(raw || "");
+  s = s.split(" -- ")[0];                                        // drop " -- metadata -- dumps"
+  s = s.replace(/\s*[-–]\s*(?:libgen|z-?lib|annas?[- ]?archive)[^\s]*.*$/i, ""); // source tags
+  s = s.replace(/^\s*(?:[\[(][^\])]*[\])]\s*)+/, "");            // leading [series]/(series) groups
+  s = s.replace(/(?:\s*\([^)]*\)\s*)+$/g, "");                   // trailing (year/publisher/series) groups
+  const sn = (authors || []).map(surnameOf).filter(Boolean);
+  let parts = s.split(/\s+[-–]\s+/).map((p) => p.trim()).filter(Boolean);
+  if (parts.length > 1 && sn.length) {                          // drop author-name segments
+    while (parts.length > 1 && sn.some((x) => parts[0].toLowerCase().includes(x))) parts.shift();
+    while (parts.length > 1 && sn.some((x) => parts[parts.length - 1].toLowerCase().includes(x))) parts.pop();
+  }
+  s = parts.join(" - ").replace(/\s*_\s*/g, ": ").replace(/\s{2,}/g, " ");
+  s = s.replace(/^[\s:_–-]+|[\s:_–-]+$/g, "").trim();
+  return s || String(raw || "").trim();
+}
+const queryTitle = (t) => (t.split(/\s*[:(]/)[0].trim() || t);  // main title only, for searching
+const titleTokens = (t) => String(t || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((w) => w.length > 2);
+function titleOverlap(a, b) {
+  const A = new Set(titleTokens(a)), B = titleTokens(b);
+  if (!A.size || !B.length) return 0;
+  let hit = 0; B.forEach((w) => { if (A.has(w)) hit++; });
+  return hit / Math.max(A.size, B.length);
+}
+async function olDocs(title, author) {
+  const p = new URLSearchParams({ limit: "5", fields: "title,author_name,cover_i,isbn,subject,number_of_pages_median" });
+  if (title) p.set("title", title);
+  if (author) p.set("author", author);
+  try { return (await fetch(`https://openlibrary.org/search.json?${p}`).then((r) => r.json())).docs || []; }
+  catch { return []; }
+}
+// Returns a patch of clean fields for a (possibly messy) book. Always standardizes the
+// title/author strings; adopts canonical title + cover + genres when a confident match exists.
+async function canonicalize(book) {
+  const authors = (book.authors || []).map(flipName);
+  const disp = cleanDisplayTitle(book.title, book.authors);
+  const patch = { title: disp, authors };
+  const wantAuthor = authors[0] || "";
+  let docs = await olDocs(queryTitle(disp), wantAuthor);
+  if (!docs.length && wantAuthor) docs = await olDocs(queryTitle(disp), "");
+  const mySn = surnameOf(authors[0] || "");
+  let best = null, bestScore = 0.6;                             // require a minimum confidence
+  for (const d of docs) {
+    const aMatch = mySn && (d.author_name || []).some((n) => surnameOf(n) === mySn) ? 1 : 0;
+    const ov = titleOverlap(disp, d.title);
+    if (!aMatch && ov < 0.5) continue;
+    const score = aMatch * 1.5 + ov + (d.cover_i ? 0.3 : 0);
+    if (score > bestScore) { bestScore = score; best = d; }
+  }
+  if (best) {
+    if (best.cover_i) patch.cover_url = `https://covers.openlibrary.org/b/id/${best.cover_i}-M.jpg`;
+    if (best.isbn && best.isbn[0]) patch.isbn = best.isbn[0];
+    if (best.subject && best.subject.length) patch.genres = best.subject.slice(0, 4);
+    if (best.number_of_pages_median) patch.page_count = best.number_of_pages_median;
+    // Prefer our cleaned title; only adopt the canonical one when it's a close,
+    // non-omnibus match (guards against "Book1 / Book2 / Book3" bind-up editions).
+    if (best.title && titleOverlap(disp, best.title) >= 0.8 && best.title.length <= disp.length + 15)
+      patch.title = best.title;
+    // Adopt canonical author names only when the author actually matched.
+    if (mySn && (best.author_name || []).some((n) => surnameOf(n) === mySn)) patch.authors = best.author_name;
+  }
+  return patch;
+}
+
 // ---------------------------------------------------------------- Helpers
 const authorStr = (b) => (b.authors && b.authors.length ? b.authors.join(", ") : "Unknown author");
 function newBookFrom(data, extra = {}) {
@@ -661,22 +736,31 @@ function parseFilename(name) {
   if (parts.length >= 2) return { title: parts[0].trim(), author: parts.slice(1).join(" - ").trim() };
   return { title: s, author: "" };
 }
-// Enrich covers via Google Books (throttled) then push everything to Supabase.
+// Standardize titles/authors + fetch covers (throttled), then push everything to Supabase.
 async function enrichAndPush(books) {
+  let n = 0;
   for (const b of books) {
-    try {
-      const res = await searchBooks(`intitle:${b.title} ${b.authors[0] || ""}`, 1);
-      if (res[0]) {
-        b.cover_url = b.cover_url || res[0].cover_url;
-        if (!b.genres.length) b.genres = res[0].genres || [];
-        if (!b.page_count) b.page_count = res[0].page_count || null;
-        if (!b.isbn) b.isbn = res[0].isbn || null;
-      }
-    } catch {}
+    try { Object.assign(b, await canonicalize(b)); } catch {}
     await pushRow("books", b);
-    await new Promise((r) => setTimeout(r, 350)); // be gentle on the free API
+    if (++n % 5 === 0) { persist(); if (state.tab === "library") render(); }
+    await new Promise((r) => setTimeout(r, 300)); // be gentle on the free API
   }
   persist(); render();
+}
+// Re-run standardization + cover fetch on books already in the library (imports).
+async function normalizeLibrary() {
+  closeSheet();
+  const targets = state.books.filter((b) => !b.cover_url || b.source === "kindle" || b.source === "nas");
+  if (!targets.length) { toast("Everything looks clean already ✓"); return; }
+  let done = 0;
+  toast(`Cleaning up ${targets.length} books…`);
+  for (const b of targets) {
+    try { Object.assign(b, await canonicalize(b)); await pushRow("books", b); } catch {}
+    if (++done % 4 === 0) { toast(`Cleaning up… ${done}/${targets.length}`); persist(); if (state.tab === "library") render(); }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  persist(); render();
+  toast(`Done — cleaned ${done} book${done === 1 ? "" : "s"} ✓`);
 }
 
 // ---------------------------------------------------------------- Goals mgmt
@@ -711,6 +795,11 @@ function openSettings() {
       <div class="muted" style="font-size:14px">${conn}</div>
       ${state.pending.length ? `<div class="muted" style="font-size:13px;margin-top:6px">${state.pending.length} change(s) waiting to sync.</div>` : ""}
       <button class="btn secondary" style="margin-top:10px" onclick="RL.refresh()">↻ Refresh from cloud</button>
+    </div>
+    <div class="section-title">Clean up imports</div>
+    <div class="card pad">
+      <div class="muted" style="font-size:14px;margin-bottom:10px">Standardize messy titles/authors and fetch cover images for imported books (Kindle & NAS).</div>
+      <button class="btn" onclick="RL.normalizeLibrary()">✨ Clean up & fetch covers</button>
     </div>
     <div class="section-title">Backup</div>
     <div class="card pad">
@@ -811,7 +900,7 @@ const RL = {
   addGoal, saveGoal, removeGoal(id) { deleteGoal(id); toast("Goal removed"); },
   buildRecs, addRec(b) { confirmAdd(b, { source: "manual", format: "physical" }); },
   importKindle, handleKindleFile, importNAS, handleNASFile, handleNASPaste,
-  openSettings, exportData, importData,
+  openSettings, exportData, importData, normalizeLibrary,
   async refresh() { closeSheet(); toast("Refreshing…"); await pullAll(); render(); },
 };
 window.RL = RL;

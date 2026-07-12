@@ -1,7 +1,7 @@
 /* Cache-first service worker so the app opens instantly and works offline.
    Bump VERSION whenever app files change — old caches are cleared on activate.
    Supabase and book-lookup API calls always go to the network (never cached). */
-const VERSION = "lib-v1";
+const VERSION = "lib-v2";
 const ASSETS = [
   "./",
   "./index.html",
