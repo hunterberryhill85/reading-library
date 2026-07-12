@@ -222,7 +222,13 @@ function cleanDisplayTitle(raw, authors) {
   s = s.replace(/^[\s:_–-]+|[\s:_–-]+$/g, "").trim();
   return s || String(raw || "").trim();
 }
-const queryTitle = (t) => (t.split(/\s*[:(]/)[0].trim() || t);  // main title only, for searching
+function queryTitle(t) {                                          // reduce to the core title for searching
+  let s = t.split(/\s*[:(]/)[0].trim();                           // drop subtitle after ":"/"("
+  s = s.replace(/\s*\b\d+[- ]book\s+(?:bundle|collection|box\s*set|set)\b.*$/i, "");
+  s = s.replace(/\s*\b(?:collector'?s|special|deluxe|anniversary|illustrated|complete|revised|expanded)\s+edition\b.*$/i, "");
+  s = s.replace(/\s*[-–]\s*$/, "").trim();
+  return s || t;
+}
 const titleTokens = (t) => String(t || "").toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/).filter((w) => w.length > 2);
 function titleOverlap(a, b) {
   const A = new Set(titleTokens(a)), B = titleTokens(b);
