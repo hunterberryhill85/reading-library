@@ -301,9 +301,32 @@ function toast(msg) {
   clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 2600);
 }
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// Deterministic color from a title, so cover-less books get consistent generated art.
+function hashHue(s) { let h = 0; s = String(s || ""); for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h % 360; }
+const coverGradient = (s) => { const h = hashHue(s); return `linear-gradient(150deg, hsl(${h} 43% 40%), hsl(${(h + 34) % 360} 47% 25%))`; };
 const coverEl = (b) => b.cover_url
   ? `<img class="cover" src="${esc(b.cover_url)}" alt="" loading="lazy">`
-  : `<div class="cover">📖</div>`;
+  : `<div class="cover" style="background:${coverGradient(b.title)}">📖</div>`;
+// A generated "book cover" (title + author on a colored spine) for books with no image.
+const genCover = (b) => `<div class="gen" style="background:${coverGradient(b.title)}">
+    <div class="gt">${esc(b.title)}</div><div class="ga">${esc(authorStr(b))}</div></div>`;
+// Chunk a list into rows of 3, each row sitting on a wooden shelf ledge.
+function shelfGrid(list, fn) {
+  let out = "";
+  for (let i = 0; i < list.length; i += 3)
+    out += `<div class="shelf"><div class="shelf-row">${list.slice(i, i + 3).map(fn).join("")}</div><div class="shelf-ledge"></div></div>`;
+  return out;
+}
+function bookTile(b) {
+  const art = b.cover_url ? `<img src="${esc(b.cover_url)}" loading="lazy" alt="">` : genCover(b);
+  const badge = b.rating ? `<div class="badge">★${b.rating}</div>` : "";
+  const ribbon = b.status === "reading" ? `<div class="ribbon reading">Reading</div>`
+    : b.status === "finished" ? `<div class="ribbon finished">✓ Read</div>` : "";
+  return `<div class="tile" onclick="RL.openBook('${b.id}')">
+    <div class="art">${art}${badge}${ribbon}</div>
+    <div class="t">${esc(b.title)}</div><div class="a">${esc(authorStr(b))}</div>
+  </div>`;
+}
 
 // ---------------------------------------------------------------- Render root
 const app = document.getElementById("app");
@@ -413,26 +436,10 @@ views.library = () => {
     </div>
     <div class="chips">${filters.map(([id, l]) =>
       `<button class="chip ${state.filter === id ? "on" : ""}" onclick="RL.setFilter('${id}')">${l}</button>`).join("")}</div>
-    ${list.length ? `<div class="card">${list.map(bookRow).join("")}</div>`
-      : `<div class="empty"><div class="ic">📚</div><p>No books yet.<br>Scan or search to add your first one.</p></div>`}
-    <p class="muted center" style="margin-top:14px;font-size:13px">${state.books.length} book${state.books.length === 1 ? "" : "s"} in library</p>`;
+    ${list.length ? shelfGrid(list, bookTile)
+      : `<div class="empty"><div class="ic">📚</div><p>No books here yet.<br>Scan or search to add one.</p></div>`}
+    <p class="muted center" style="margin-top:6px;font-size:13px">${list.length} of ${state.books.length} book${state.books.length === 1 ? "" : "s"}</p>`;
 };
-function bookRow(b) {
-  const tags = [];
-  if (b.status === "reading") tags.push(`<span class="pill status-reading">Reading</span>`);
-  if (b.status === "finished") tags.push(`<span class="pill status-finished">Finished</span>`);
-  if (b.rating) tags.push(`<span class="pill rate">★ ${b.rating}/10</span>`);
-  if (b.format === "ebook") tags.push(`<span class="pill">eBook</span>`);
-  if (b.queue_pos != null) tags.push(`<span class="pill">In queue</span>`);
-  return `<div class="book" onclick="RL.openBook('${b.id}')">
-    ${coverEl(b)}
-    <div class="meta">
-      <div class="title">${esc(b.title)}</div>
-      <div class="authors">${esc(authorStr(b))}</div>
-      <div class="tags">${tags.join("")}</div>
-    </div>
-  </div>`;
-}
 
 // ---- Queue tab ----------------------------------------------------------
 views.queue = () => {
@@ -552,16 +559,14 @@ views.recs = () => {
 };
 function renderRecs(items) {
   if (!items || !items.length) return `<p class="muted center" style="margin-top:16px">No new suggestions found. Try refreshing after rating more books.</p>`;
-  return `<div class="section-title">You might like</div><div class="card">${items.map((b) => `
-    <div class="book recbook" onclick='RL.addRec(${JSON.stringify(b).replace(/'/g, "&#39;")})'>
-      ${coverEl(b)}
-      <div class="meta">
-        <div class="title">${esc(b.title)}</div>
-        <div class="authors">${esc(authorStr(b))}</div>
-        <div class="tags">${(b.reason ? [`<span class="pill">${esc(b.reason)}</span>`] : []).join("")}
-          <span class="pill status-reading">+ Add</span></div>
-      </div>
-    </div>`).join("")}</div>`;
+  return `<div class="section-title">You might like</div>${shelfGrid(items, recTile)}`;
+}
+function recTile(b) {
+  const art = b.cover_url ? `<img src="${esc(b.cover_url)}" loading="lazy" alt="">` : genCover(b);
+  return `<div class="tile" onclick='RL.addRec(${JSON.stringify(b).replace(/'/g, "&#39;")})'>
+    <div class="art">${art}<div class="ribbon" style="background:linear-gradient(0deg,color-mix(in srgb,var(--brand) 92%,#000),transparent)">+ Add</div></div>
+    <div class="t">${esc(b.title)}</div><div class="a">${esc(authorStr(b))}</div>
+  </div>`;
 }
 async function buildRecs() {
   const out = $("#recsOut");
