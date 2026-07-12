@@ -205,11 +205,18 @@ function cleanDisplayTitle(raw, authors) {
   s = s.replace(/\s*[-–]\s*(?:libgen|z-?lib|annas?[- ]?archive)[^\s]*.*$/i, ""); // source tags
   s = s.replace(/^\s*(?:[\[(][^\])]*[\])]\s*)+/, "");            // leading [series]/(series) groups
   s = s.replace(/(?:\s*\([^)]*\)\s*)+$/g, "");                   // trailing (year/publisher/series) groups
-  const sn = (authors || []).map(surnameOf).filter(Boolean);
+  const names = [...new Set([...(authors || []).map(flipName), ...(authors || []).map((a) => String(a || "").trim())])].filter(Boolean);
+  for (const a of names) {                                       // strip author name glued at start/end (any dash spacing)
+    const e = a.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    s = s.replace(new RegExp("^\\s*" + e + "\\s*[-–:]\\s*", "i"), "");
+    s = s.replace(new RegExp("\\s*[-–]\\s*" + e + "\\s*$", "i"), "");
+  }
+  const norm = (x) => x.toLowerCase().replace(/[^a-z0-9]/g, ""); // apostrophe/punctuation-insensitive
+  const sn = names.map(surnameOf).filter(Boolean);
   let parts = s.split(/\s+[-–]\s+/).map((p) => p.trim()).filter(Boolean);
   if (parts.length > 1 && sn.length) {                          // drop author-name segments
-    while (parts.length > 1 && sn.some((x) => parts[0].toLowerCase().includes(x))) parts.shift();
-    while (parts.length > 1 && sn.some((x) => parts[parts.length - 1].toLowerCase().includes(x))) parts.pop();
+    while (parts.length > 1 && sn.some((x) => norm(parts[0]).includes(x))) parts.shift();
+    while (parts.length > 1 && sn.some((x) => norm(parts[parts.length - 1]).includes(x))) parts.pop();
   }
   s = parts.join(" - ").replace(/\s*_\s*/g, ": ").replace(/\s{2,}/g, " ");
   s = s.replace(/^[\s:_–-]+|[\s:_–-]+$/g, "").trim();
